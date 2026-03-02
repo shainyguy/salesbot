@@ -2,8 +2,8 @@ from __future__ import annotations
 import logging
 import sys
 import json
+import asyncio
 
-import httpx
 from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.types import Update
@@ -19,7 +19,7 @@ from payment_service import set_bot_username, handle_yookassa_webhook
 from handlers import setup_routers
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     stream=sys.stdout,
 )
@@ -41,29 +41,74 @@ dp.callback_query.middleware(SubscriptionMiddleware())
 dp.include_router(setup_routers())
 
 
-# ── Обработчики ────────────────────────────────────────
-
-async def health_handler(request: web.Request) -> web.Response:
-    return web.json_response({"status": "ok", "bot": "salesbot"})
-
+# ── Telegram webhook handler ───────────────────────────
 
 async def telegram_webhook_handler(request: web.Request) -> web.Response:
     try:
         body = await request.read()
-        logger.info(f"=== TELEGRAM POST RECEIVED === size={len(body)}")
+        logger.info(f">>> TELEGRAM POST size={len(body)}")
         data = json.loads(body)
-        logger.info(f"UPDATE RAW: {json.dumps(data, ensure_ascii=False)[:2000]}")
+        logger.info(f"UPDATE: {json.dumps(data, ensure_ascii=False)[:2000]}")
 
         update = Update.model_validate(data, context={"bot": bot})
-        logger.info(f"UPDATE OK: type={update.event_type} id={update.update_id}")
-
         await dp.feed_update(bot=bot, update=update)
-        logger.info(f"UPDATE {update.update_id} PROCESSED")
-
+        logger.info(f"UPDATE {update.update_id} OK")
     except Exception as e:
-        logger.error(f"WEBHOOK PROCESSING ERROR: {e}", exc_info=True)
+        logger.error(f"WEBHOOK ERROR: {e}", exc_info=True)
 
     return web.json_response({"ok": True})
+
+
+# ── Другие эндпоинты ──────────────────────────────────
+
+async def health_handler(request: web.Request) -> web.Response:
+    return web.json_response({"status": "ok"})
+
+
+async def debug_handler(request: web.Request) -> web.Response:
+    info = await bot.get_webhook_info()
+    return web.json_response({
+        "webhook_url": info.url,
+        "pending": info.pending_update_count,
+        "last_error": info.last_error_message,
+        "ip": info.ip_address,
+        "host_env": config.WEBHOOK_HOST,
+        "admins": config.ADMIN_IDS,
+    })
+
+
+async def test_handler(request: web.Request) -> web.Response:
+    results = []
+    for aid in config.ADMIN_IDS:
+        try:
+            await bot.send_message(aid, "🟢 <b>Тест — бот работает!</b>\nОтправь /start")
+            results.append({"id": aid, "ok": True})
+        except Exception as e:
+            results.append({"id": aid, "ok": False, "err": str(e)})
+    return web.json_response(results)
+
+
+async def fix_webhook_handler(request: web.Request) -> web.Response:
+    """Ручная переустановка webhook — открой в браузере если webhook слетел."""
+    host = config.WEBHOOK_HOST.strip().rstrip("/")
+    url = f"https://{host}/webhook"
+
+    await bot.delete_webhook(drop_pending_updates=True)
+    await asyncio.sleep(0.5)
+    ok = await bot.set_webhook(url=url, allowed_updates=["message", "callback_query"])
+    info = await bot.get_webhook_info()
+
+    for aid in config.ADMIN_IDS:
+        try:
+            await bot.send_message(aid, f"🔧 Webhook переустановлен!\nURL: {url}\nОтправь /start")
+        except Exception:
+            pass
+
+    return web.json_response({
+        "fixed": ok,
+        "url": info.url,
+        "pending": info.pending_update_count,
+    })
 
 
 async def yookassa_webhook_handler(request: web.Request) -> web.Response:
@@ -72,103 +117,18 @@ async def yookassa_webhook_handler(request: web.Request) -> web.Response:
         logger.info(f"YOOKASSA: {json.dumps(body, ensure_ascii=False)[:500]}")
         success = await handle_yookassa_webhook(body)
         if success:
-            metadata = body.get("object", {}).get("metadata", {})
-            tid = metadata.get("telegram_id")
-            plan = metadata.get("plan", "pro")
+            meta = body.get("object", {}).get("metadata", {})
+            tid = meta.get("telegram_id")
+            plan = meta.get("plan", "pro")
             if tid and body.get("event") == "payment.succeeded":
                 try:
                     await bot.send_message(int(tid), f"✅ Тариф <b>{plan}</b> активирован! 🎉")
                 except Exception:
                     pass
-        return web.json_response({"status": "ok"})
+        return web.json_response({"ok": True})
     except Exception as e:
         logger.error(f"YooKassa error: {e}", exc_info=True)
-        return web.json_response({"status": "error"}, status=500)
-
-
-async def debug_handler(request: web.Request) -> web.Response:
-    try:
-        info = await bot.get_webhook_info()
-        return web.json_response({
-            "webhook_url": info.url,
-            "pending_updates": info.pending_update_count,
-            "last_error": info.last_error_message,
-            "last_error_date": str(info.last_error_date) if info.last_error_date else None,
-            "max_connections": info.max_connections,
-            "ip_address": info.ip_address,
-            "allowed_updates": info.allowed_updates,
-            "webhook_host_env": config.WEBHOOK_HOST,
-            "admin_ids": config.ADMIN_IDS,
-        })
-    except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
-
-
-async def test_handler(request: web.Request) -> web.Response:
-    """Отправляет тестовое сообщение админу — проверить что бот вообще работает."""
-    results = []
-    for admin_id in config.ADMIN_IDS:
-        try:
-            await bot.send_message(
-                admin_id,
-                "🟢 <b>Тест пройден!</b>\n\n"
-                "Бот работает. Если ты видишь это сообщение — "
-                "проблема только в webhook.\n\n"
-                "Отправь мне /start прямо сейчас.",
-            )
-            results.append({"admin_id": admin_id, "status": "sent"})
-        except Exception as e:
-            results.append({"admin_id": admin_id, "status": "error", "error": str(e)})
-
-    return web.json_response({"results": results})
-
-
-async def selftest_handler(request: web.Request) -> web.Response:
-    """
-    Бот сам проверяет свой webhook:
-    делает POST на свой URL и смотрит ответ.
-    """
-    host = config.WEBHOOK_HOST.strip().rstrip("/")
-    url = f"https://{host}/webhook"
-
-    fake_update = {
-        "update_id": 999999999,
-        "message": {
-            "message_id": 1,
-            "from": {"id": 1, "is_bot": False, "first_name": "Test"},
-            "chat": {"id": 1, "type": "private"},
-            "date": 1234567890,
-            "text": "/selftest"
-        }
-    }
-
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(url, json=fake_update, timeout=10)
-            return web.json_response({
-                "test_url": url,
-                "status_code": resp.status_code,
-                "response": resp.text[:500],
-                "reachable": resp.status_code == 200,
-            })
-    except Exception as e:
-        return web.json_response({
-            "test_url": url,
-            "reachable": False,
-            "error": str(e),
-        })
-
-
-# ── Catch-all для ЛЮБОГО POST ──────────────────────────
-
-async def catch_all_post(request: web.Request) -> web.Response:
-    body = await request.read()
-    logger.warning(
-        f"CATCH-ALL POST: path={request.path} "
-        f"from={request.remote} "
-        f"body={body[:500]}"
-    )
-    return web.json_response({"caught": request.path})
 
 
 # ── Startup ────────────────────────────────────────────
@@ -180,60 +140,46 @@ async def on_app_startup(app: web.Application) -> None:
 
     me = await bot.get_me()
     set_bot_username(me.username)
-    logger.info(f"Bot: @{me.username} (id={me.id})")
+    logger.info(f"Bot: @{me.username}")
 
-    # ПОЛНЫЙ СБРОС
+    # Удалить старый + подождать
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Webhook DELETED + pending dropped")
-
-    import asyncio
     await asyncio.sleep(1)
 
+    # Установить новый
     host = config.WEBHOOK_HOST.strip().rstrip("/")
-    if not host:
-        logger.error("WEBHOOK_HOST EMPTY!")
-        return
+    url = f"https://{host}/webhook"
+    ok = await bot.set_webhook(url=url, allowed_updates=["message", "callback_query"])
+    logger.info(f"Webhook set={ok} url={url}")
 
-    webhook_url = f"https://{host}/webhook"
-    logger.info(f"Setting webhook: {webhook_url}")
-
-    ok = await bot.set_webhook(
-        url=webhook_url,
-        allowed_updates=["message", "callback_query"],
-        drop_pending_updates=False,
-    )
-    logger.info(f"set_webhook: {ok}")
-
+    # Проверить
     info = await bot.get_webhook_info()
-    logger.info(
-        f"WEBHOOK: url={info.url} "
-        f"pending={info.pending_update_count} "
-        f"error={info.last_error_message} "
-        f"ip={info.ip_address} "
-        f"max_conn={info.max_connections}"
-    )
+    logger.info(f"Webhook CHECK: url={info.url} pending={info.pending_update_count} err={info.last_error_message}")
 
-    # Отправить тестовое сообщение админу
-    for admin_id in config.ADMIN_IDS:
+    if not info.url:
+        logger.error("!!! WEBHOOK URL IS EMPTY AFTER SET !!!")
+
+    # Уведомить админа
+    for aid in config.ADMIN_IDS:
         try:
             await bot.send_message(
-                admin_id,
-                f"🟢 <b>Бот запущен!</b>\n\n"
-                f"Webhook: <code>{webhook_url}</code>\n"
-                f"Отправь /start чтобы проверить.",
+                aid,
+                f"🟢 <b>Бот запущен!</b>\n"
+                f"Webhook: <code>{url}</code>\n"
+                f"Webhook active: <b>{bool(info.url)}</b>\n"
+                f"Отправь /start",
             )
-            logger.info(f"Startup msg sent to admin {admin_id}")
         except Exception as e:
-            logger.error(f"Failed to notify admin {admin_id}: {e}")
+            logger.error(f"Admin notify fail: {e}")
 
     init_scheduler(bot)
     logger.info("=== STARTUP COMPLETE ===")
 
 
 async def on_app_shutdown(app: web.Application) -> None:
-    logger.info("=== SHUTDOWN ===")
+    """НЕ удаляем webhook при остановке — Railway перезапускает контейнеры."""
+    logger.info("=== SHUTDOWN (webhook kept) ===")
     try:
-        await bot.delete_webhook()
         await bot.session.close()
     except Exception:
         pass
@@ -243,29 +189,22 @@ async def on_app_shutdown(app: web.Application) -> None:
 
 def create_app() -> web.Application:
     app = web.Application()
-
     app.on_startup.append(on_app_startup)
     app.on_shutdown.append(on_app_shutdown)
 
-    # Основные маршруты
     app.router.add_get("/", health_handler)
     app.router.add_get("/health", health_handler)
     app.router.add_get("/debug", debug_handler)
     app.router.add_get("/test", test_handler)
-    app.router.add_get("/selftest", selftest_handler)
+    app.router.add_get("/fix", fix_webhook_handler)
     app.router.add_post("/webhook", telegram_webhook_handler)
     app.router.add_post("/yookassa/webhook", yookassa_webhook_handler)
-
-    for resource in app.router.resources():
-        for route in resource:
-            logger.info(f"ROUTE: {route.method} {route.resource.canonical}")
 
     return app
 
 
 def main() -> None:
-    logger.info(f"HOST={config.WEBAPP_HOST} PORT={config.WEBAPP_PORT}")
-    logger.info(f"WEBHOOK_HOST={config.WEBHOOK_HOST}")
+    logger.info(f"Starting: host={config.WEBAPP_HOST} port={config.WEBAPP_PORT} webhook={config.WEBHOOK_HOST}")
     app = create_app()
     web.run_app(app, host=config.WEBAPP_HOST, port=config.WEBAPP_PORT, print=None)
 
