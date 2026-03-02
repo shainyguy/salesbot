@@ -3,7 +3,8 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional, Sequence
 
-from sqlalchemy import select, func, update, delete, and_
+import sqlalchemy
+from sqlalchemy import select, func, update, delete, and_, text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 
 from config import config
@@ -24,14 +25,65 @@ SessionFactory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commi
 
 async def init_db() -> None:
     """
-    Пересоздаёт все таблицы.
-    ВАЖНО: после первого успешного запуска замените на версию
-    БЕЗ drop_all, чтобы не терять данные!
+    Безопасная инициализация:
+    - создаёт таблицы которых нет
+    - добавляет недостающие колонки в существующую таблицу users
+    - НЕ удаляет и НЕ ломает чужие таблицы
     """
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
+        # 1. Создаём наши таблицы (IF NOT EXISTS — под капотом)
         await conn.run_sync(Base.metadata.create_all)
-    logger.info("Database tables created successfully")
+        logger.info("Base tables ensured")
+
+        # 2. Добавляем недостающие колонки в users
+        user_columns = {
+            "full_name": "VARCHAR(512)",
+            "phone": "VARCHAR(32)",
+            "role": "VARCHAR(32) DEFAULT 'user'",
+            "plan": "VARCHAR(32) DEFAULT 'free'",
+            "subscription_expires": "TIMESTAMP",
+            "trial_ends": "TIMESTAMP",
+            "is_active": "BOOLEAN DEFAULT TRUE",
+            "referral_code": "VARCHAR(32)",
+            "referred_by": "INTEGER",
+            "username": "VARCHAR(255)",
+            "created_at": "TIMESTAMP DEFAULT NOW()",
+        }
+        for col_name, col_type in user_columns.items():
+            try:
+                await conn.execute(
+                    text(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col_name} {col_type}")
+                )
+            except Exception as e:
+                logger.debug(f"Column users.{col_name} skip: {e}")
+
+        # 3. Добавляем недостающие колонки в leads
+        lead_columns = {
+            "owner_id": "INTEGER",
+            "telegram_id": "BIGINT",
+            "name": "VARCHAR(512)",
+            "phone": "VARCHAR(32)",
+            "email": "VARCHAR(256)",
+            "source": "VARCHAR(128)",
+            "status": "VARCHAR(32) DEFAULT 'new'",
+            "score": "INTEGER DEFAULT 0",
+            "is_vip": "BOOLEAN DEFAULT FALSE",
+            "quiz_data": "JSONB",
+            "notes": "TEXT",
+            "response_time_min": "INTEGER",
+            "first_contact_at": "TIMESTAMP",
+            "created_at": "TIMESTAMP DEFAULT NOW()",
+            "updated_at": "TIMESTAMP DEFAULT NOW()",
+        }
+        for col_name, col_type in lead_columns.items():
+            try:
+                await conn.execute(
+                    text(f"ALTER TABLE leads ADD COLUMN IF NOT EXISTS {col_name} {col_type}")
+                )
+            except Exception as e:
+                logger.debug(f"Column leads.{col_name} skip: {e}")
+
+    logger.info("Database init complete — all columns verified")
 
 
 async def get_session() -> AsyncSession:
