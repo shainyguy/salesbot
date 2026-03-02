@@ -13,8 +13,6 @@ logger = logging.getLogger(__name__)
 
 
 class AuthMiddleware(BaseMiddleware):
-    """Загружает / создаёт пользователя и кладёт в data['db_user']."""
-
     async def __call__(
         self,
         handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
@@ -22,29 +20,30 @@ class AuthMiddleware(BaseMiddleware):
         data: Dict[str, Any],
     ) -> Any:
         user = None
-        if isinstance(event, Message) and event.from_user:
-            user = await get_or_create_user(
-                telegram_id=event.from_user.id,
-                username=event.from_user.username,
-                full_name=event.from_user.full_name,
-            )
-        elif isinstance(event, CallbackQuery) and event.from_user:
-            user = await get_or_create_user(
-                telegram_id=event.from_user.id,
-                username=event.from_user.username,
-                full_name=event.from_user.full_name,
-            )
+        try:
+            if isinstance(event, Message) and event.from_user:
+                logger.info(f"MSG from {event.from_user.id}: {event.text}")
+                user = await get_or_create_user(
+                    telegram_id=event.from_user.id,
+                    username=event.from_user.username,
+                    full_name=event.from_user.full_name,
+                )
+            elif isinstance(event, CallbackQuery) and event.from_user:
+                logger.info(f"CB from {event.from_user.id}: {event.data}")
+                user = await get_or_create_user(
+                    telegram_id=event.from_user.id,
+                    username=event.from_user.username,
+                    full_name=event.from_user.full_name,
+                )
+        except Exception as e:
+            logger.error(f"AUTH MIDDLEWARE ERROR: {e}", exc_info=True)
+            user = None
+
         data["db_user"] = user
         return await handler(event, data)
 
 
 class SubscriptionMiddleware(BaseMiddleware):
-    """Проверяет подписку перед доступом к платным функциям."""
-
-    PREMIUM_ACTIONS = {
-        "ai", "booking", "crm", "export", "funnel", "vip",
-    }
-
     async def __call__(
         self,
         handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
@@ -53,9 +52,9 @@ class SubscriptionMiddleware(BaseMiddleware):
     ) -> Any:
         user = data.get("db_user")
         if not user:
+            data["has_premium"] = False
             return await handler(event, data)
 
-        # Admins bypass
         if user.role == "admin":
             data["has_premium"] = True
             return await handler(event, data)

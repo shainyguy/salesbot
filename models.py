@@ -14,7 +14,7 @@ class Base(DeclarativeBase):
 
 
 class User(Base):
-    __tablename__ = "users"
+    __tablename__ = "sb_users"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
@@ -35,10 +35,10 @@ class User(Base):
 
 
 class Lead(Base):
-    __tablename__ = "leads"
+    __tablename__ = "sb_leads"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    owner_id: Mapped[int] = mapped_column(ForeignKey("sb_users.id"))
     telegram_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     name: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     phone: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
@@ -62,10 +62,10 @@ class Lead(Base):
 
 
 class Payment(Base):
-    __tablename__ = "payments"
+    __tablename__ = "sb_payments"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    user_id: Mapped[int] = mapped_column(ForeignKey("sb_users.id"))
     yookassa_id: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
     amount: Mapped[float] = mapped_column(Float, default=0)
     currency: Mapped[str] = mapped_column(String(8), default="RUB")
@@ -79,10 +79,10 @@ class Payment(Base):
 
 
 class Booking(Base):
-    __tablename__ = "bookings"
+    __tablename__ = "sb_bookings"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    lead_id: Mapped[int] = mapped_column(ForeignKey("leads.id"))
+    lead_id: Mapped[int] = mapped_column(ForeignKey("sb_leads.id"))
     owner_id: Mapped[int] = mapped_column(Integer)
     service: Mapped[str] = mapped_column(String(256))
     book_date: Mapped[date] = mapped_column(Date)
@@ -96,10 +96,10 @@ class Booking(Base):
 
 
 class FollowUp(Base):
-    __tablename__ = "followups"
+    __tablename__ = "sb_followups"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    lead_id: Mapped[int] = mapped_column(ForeignKey("leads.id"))
+    lead_id: Mapped[int] = mapped_column(ForeignKey("sb_leads.id"))
     owner_id: Mapped[int] = mapped_column(Integer)
     chain_id: Mapped[str] = mapped_column(String(64))
     step: Mapped[int] = mapped_column(Integer, default=1)
@@ -112,7 +112,7 @@ class FollowUp(Base):
 
 
 class AnalyticsEvent(Base):
-    __tablename__ = "analytics_events"
+    __tablename__ = "sb_analytics"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(Integer)

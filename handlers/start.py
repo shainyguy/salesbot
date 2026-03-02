@@ -8,11 +8,12 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 from config import config
-from database import get_user, update_user, log_event
-from keyboards import (
-    main_menu_kb, MenuCB, back_kb,
-)
+from database import log_event
+from keyboards import main_menu_kb, MenuCB, back_kb
 from ai_service import ai_business_consultant
+
+import logging
+logger = logging.getLogger(__name__)
 
 router = Router()
 
@@ -23,17 +24,25 @@ class AIChat(StatesGroup):
 
 @router.message(Command("start"))
 async def cmd_start(message: Message, db_user, **kwargs):
+    logger.info(f"/start from {message.from_user.id}, db_user={db_user}")
+
+    if db_user is None:
+        await message.answer(
+            "⚠️ Ошибка инициализации. Попробуйте ещё раз через 5 секунд: /start"
+        )
+        return
+
     is_admin = db_user.role == "admin"
     await log_event(db_user.id, "start")
 
     welcome = (
         f"👋 Добро пожаловать, <b>{message.from_user.full_name}</b>!\n\n"
         "Я — <b>SalesBot</b>, ваш AI-помощник для автоматизации продаж.\n\n"
-        "🔍 Проведу диагностику бизнеса\n"
-        "💰 Рассчитаю потери денег\n"
-        "🔁 Настрою авто-дожим\n"
-        "📅 Автоматизирую запись\n"
-        "📊 Покажу аналитику\n"
+        "🔍 Диагностика бизнеса\n"
+        "💰 Расчёт потерь денег\n"
+        "🔁 Авто-дожим клиентов\n"
+        "📅 Автоматическая запись\n"
+        "📊 Аналитика и CRM\n"
         "🤖 AI-консультант 24/7\n\n"
     )
 
@@ -43,11 +52,14 @@ async def cmd_start(message: Message, db_user, **kwargs):
 
     welcome += "Выберите действие 👇"
 
-    await message.answer(welcome, parse_mode="HTML", reply_markup=main_menu_kb(is_admin))
+    await message.answer(welcome, reply_markup=main_menu_kb(is_admin))
 
 
 @router.message(Command("menu"))
 async def cmd_menu(message: Message, db_user, **kwargs):
+    if db_user is None:
+        await message.answer("Нажмите /start")
+        return
     is_admin = db_user.role == "admin"
     await message.answer("📋 Главное меню:", reply_markup=main_menu_kb(is_admin))
 
@@ -55,21 +67,20 @@ async def cmd_menu(message: Message, db_user, **kwargs):
 @router.message(Command("help"))
 async def cmd_help(message: Message, **kwargs):
     text = (
-        "ℹ️ <b>Доступные команды:</b>\n\n"
+        "ℹ️ <b>Команды:</b>\n\n"
         "/start — Запуск бота\n"
         "/menu — Главное меню\n"
-        "/profile — Мой профиль\n"
-        "/subscribe — Подписка\n"
-        "/help — Помощь\n\n"
-        "По вопросам: @support"
+        "/help — Помощь\n"
     )
-    await message.answer(text, parse_mode="HTML")
+    await message.answer(text)
 
-
-# ── Профиль ────────────────────────────────────────────
 
 @router.callback_query(MenuCB.filter(F.action == "profile"))
 async def show_profile(callback: CallbackQuery, db_user, **kwargs):
+    if db_user is None:
+        await callback.answer("Нажмите /start", show_alert=True)
+        return
+
     now = datetime.utcnow()
     plan_info = config.PLANS.get(db_user.plan, {})
 
@@ -82,38 +93,36 @@ async def show_profile(callback: CallbackQuery, db_user, **kwargs):
         sub_status = f"🎁 Триал ({days} дн.)"
 
     text = (
-        f"👤 <b>Ваш профиль</b>\n\n"
-        f"📛 Имя: {db_user.full_name or '—'}\n"
-        f"🆔 ID: <code>{db_user.telegram_id}</code>\n"
+        f"👤 <b>Профиль</b>\n\n"
+        f"📛 {db_user.full_name or '—'}\n"
         f"📊 Тариф: <b>{plan_info.get('title', db_user.plan)}</b>\n"
         f"💎 Подписка: {sub_status}\n"
         f"📅 Регистрация: {db_user.created_at.strftime('%d.%m.%Y')}\n"
-        f"🔗 Реф. код: <code>{db_user.referral_code or '—'}</code>\n"
     )
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=back_kb())
     await callback.answer()
 
 
-# ── Назад в меню ───────────────────────────────────────
-
 @router.callback_query(MenuCB.filter(F.action == "back"))
 async def back_to_menu(callback: CallbackQuery, db_user, **kwargs):
+    if db_user is None:
+        await callback.answer("Нажмите /start", show_alert=True)
+        return
     is_admin = db_user.role == "admin"
     await callback.message.edit_text("📋 Главное меню:", reply_markup=main_menu_kb(is_admin))
     await callback.answer()
 
 
-# ── AI-консультант ─────────────────────────────────────
-
 @router.callback_query(MenuCB.filter(F.action == "ai"))
 async def ai_menu(callback: CallbackQuery, state: FSMContext, db_user, has_premium, **kwargs):
+    if db_user is None:
+        await callback.answer("Нажмите /start", show_alert=True)
+        return
     if not has_premium:
-        await callback.answer("💎 Функция доступна по подписке", show_alert=True)
+        await callback.answer("💎 Доступно по подписке", show_alert=True)
         return
     await callback.message.edit_text(
-        "🤖 <b>AI-консультант</b>\n\n"
-        "Задайте любой вопрос о продажах, воронках, конверсии.\n"
-        "Напишите сообщение 👇",
+        "🤖 <b>AI-консультант</b>\n\nЗадайте вопрос о продажах, воронках, конверсии 👇",
         parse_mode="HTML",
         reply_markup=back_kb(),
     )
@@ -126,5 +135,6 @@ async def ai_response(message: Message, state: FSMContext, db_user, **kwargs):
     await message.answer("🤖 Думаю...")
     answer = await ai_business_consultant(message.text)
     await message.answer(answer, reply_markup=back_kb())
-    await log_event(db_user.id, "ai_chat", {"question": message.text[:200]})
+    if db_user:
+        await log_event(db_user.id, "ai_chat", {"q": message.text[:200]})
     await state.clear()
