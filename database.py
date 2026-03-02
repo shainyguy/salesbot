@@ -23,9 +23,15 @@ SessionFactory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commi
 
 
 async def init_db() -> None:
+    """
+    Пересоздаёт все таблицы.
+    ВАЖНО: после первого успешного запуска замените на версию
+    БЕЗ drop_all, чтобы не терять данные!
+    """
     async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
-    logger.info("Database tables created")
+    logger.info("Database tables created successfully")
 
 
 async def get_session() -> AsyncSession:
@@ -59,7 +65,7 @@ async def get_or_create_user(
         s.add(user)
         await s.commit()
         await s.refresh(user)
-        logger.info(f"New user {telegram_id}")
+        logger.info(f"New user created: {telegram_id}")
         return user
 
 
@@ -96,11 +102,12 @@ async def count_active_subscriptions() -> dict[str, int]:
         now = datetime.utcnow()
         plans = {}
         for plan_name in config.PLANS:
-            stmt = select(func.count(User.id)).where(
-                and_(User.plan == plan_name, User.subscription_expires > now)
-            )
             if plan_name == "free":
                 stmt = select(func.count(User.id)).where(User.plan == plan_name)
+            else:
+                stmt = select(func.count(User.id)).where(
+                    and_(User.plan == plan_name, User.subscription_expires > now)
+                )
             result = await s.execute(stmt)
             plans[plan_name] = result.scalar_one()
         return plans
